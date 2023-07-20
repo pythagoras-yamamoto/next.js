@@ -395,9 +395,14 @@ interface Entrypoints {
   middleware?: Middleware
 }
 
+interface Update {
+  update: unknown
+}
+
 interface Project {
   update(options: ProjectOptions): Promise<void>
   entrypointsSubscribe(): AsyncIterableIterator<TurbopackResult<Entrypoints>>
+  hmrEvents(identifier: string): AsyncIterableIterator<TurbopackResult<Update>>
 }
 
 type Route =
@@ -587,8 +592,6 @@ function bindingToApi(binding: any, _wasm: boolean) {
       type NapiEntrypoints = {
         routes: NapiRoute[]
         middleware?: NapiMiddleware
-        issues: Issue[]
-        diagnostics: Diagnostics[]
       }
 
       type NapiMiddleware = {
@@ -623,8 +626,10 @@ function bindingToApi(binding: any, _wasm: boolean) {
           }
       )
 
-      const subscription = subscribe<NapiEntrypoints>(false, async (callback) =>
-        binding.projectEntrypointsSubscribe(await this._nativeProject, callback)
+      const subscription = subscribe<TurbopackResult<NapiEntrypoints>>(
+        false,
+        async (callback) =>
+          binding.projectEntrypointsSubscribe(this._nativeProject, callback)
       )
       return (async function* () {
         for await (const entrypoints of subscription) {
@@ -688,6 +693,15 @@ function bindingToApi(binding: any, _wasm: boolean) {
           }
         }
       })()
+    }
+
+    hmrEvents(identifier: string) {
+      const subscription = subscribe<TurbopackResult<Update>>(
+        false,
+        async (callback) =>
+          binding.projectHmrEvents(this._nativeProject, identifier, callback)
+      )
+      return subscription
     }
   }
 

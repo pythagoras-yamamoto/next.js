@@ -7,6 +7,7 @@ mod entrypoints;
 mod pages;
 pub mod project;
 pub mod route;
+mod versioned_content_map;
 
 pub fn register() {
     next_core::register();

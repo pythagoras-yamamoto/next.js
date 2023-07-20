@@ -1,20 +1,25 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use napi::{bindgen_prelude::External, JsFunction};
+use napi::{bindgen_prelude::External, JsFunction, JsUnknown};
 use next_api::{
     project::{Middleware, ProjectContainer, ProjectOptions},
     route::{Endpoint, Route},
 };
-use turbo_tasks::{TurboTasks, Vc};
+use turbo_tasks::{TransientInstance, TurboTasks, Vc};
 use turbopack_binding::{
-    turbo::tasks_memory::MemoryBackend, turbopack::core::error::PrettyPrintError,
+    turbo::tasks_memory::MemoryBackend,
+    turbopack::{
+        core::{error::PrettyPrintError, version::Update},
+        ecmascript_hmr_protocol::{ClientUpdateInstruction, ResourceIdentifier},
+    },
 };
 
 use super::{
     endpoint::ExternalEndpoint,
     utils::{
-        get_issues, serde_enum_to_string, subscribe, NapiDiagnostic, NapiIssue, RootTask, VcArc,
+        get_issues, serde_enum_to_string, subscribe, subscribe_channel, NapiIssue, RootTask,
+        TurbopackResult, VcArc,
     },
 };
 use crate::register;
@@ -202,13 +207,10 @@ impl NapiMiddleware {
         })
     }
 }
-
 #[napi(object)]
 struct NapiEntrypoints {
     pub routes: Vec<NapiRoute>,
     pub middleware: Option<NapiMiddleware>,
-    pub issues: Vec<NapiIssue>,
-    pub diagnostics: Vec<NapiDiagnostic>,
 }
 
 #[napi(ts_return_type = "{ __napiType: \"RootTask\" }")]
@@ -232,25 +234,91 @@ pub fn project_entrypoints_subscribe(
         },
         move |ctx| {
             let (entrypoints, issues) = ctx.value;
-            Ok(vec![NapiEntrypoints {
-                routes: entrypoints
-                    .routes
-                    .iter()
-                    .map(|(pathname, &route)| {
-                        NapiRoute::from_route(pathname.clone(), route, &turbo_tasks)
-                    })
-                    .collect::<Vec<_>>(),
-                middleware: entrypoints
-                    .middleware
-                    .as_ref()
-                    .map(|m| NapiMiddleware::from_middleware(m, &turbo_tasks))
-                    .transpose()?,
+            Ok(vec![TurbopackResult {
+                result: NapiEntrypoints {
+                    routes: entrypoints
+                        .routes
+                        .iter()
+                        .map(|(pathname, &route)| {
+                            NapiRoute::from_route(pathname.clone(), route, &turbo_tasks)
+                        })
+                        .collect::<Vec<_>>(),
+                    middleware: entrypoints
+                        .middleware
+                        .as_ref()
+                        .map(|m| NapiMiddleware::from_middleware(m, &turbo_tasks))
+                        .transpose()?,
+                },
                 issues: issues
                     .iter()
                     .map(|issue| NapiIssue::from(&**issue))
                     .collect(),
                 diagnostics: vec![],
             }])
+        },
+    )
+}
+
+#[napi(object)]
+struct NapiUpdate {
+    pub update: JsUnknown,
+}
+
+#[napi(ts_return_type = "{ __napiType: \"RootTask\" }")]
+pub fn project_hmr_events(
+    #[napi(ts_arg_type = "{ __napiType: \"Project\" }")] project: External<
+        VcArc<Vc<ProjectContainer>>,
+    >,
+    identifier: String,
+    func: JsFunction,
+) -> napi::Result<External<RootTask>> {
+    let turbo_tasks = project.turbo_tasks().clone();
+    let project = **project;
+    subscribe_channel(
+        turbo_tasks.clone(),
+        func,
+        {
+            let identifier = identifier.clone();
+            move |sender| {
+                let identifier = identifier.clone();
+                async move {
+                    project
+                        .project()
+                        .hmr_events(identifier, TransientInstance::new(sender))
+                        .await?;
+
+                    Ok(())
+                }
+            }
+        },
+        move |ctx| {
+            let item = ctx.value;
+
+            let issues: Vec<_> = item.issues.iter().map(|issue| (&**issue).into()).collect();
+            let identifier = ResourceIdentifier {
+                path: identifier.clone(),
+                headers: None,
+            };
+            let update = match &*item.update {
+                Update::Total(_) => ClientUpdateInstruction::restart(&identifier, &issues),
+                Update::Partial(update) => {
+                    ClientUpdateInstruction::partial(&identifier, &update.instruction, &issues)
+                }
+                Update::None => ClientUpdateInstruction::issues(&identifier, &issues),
+            };
+
+            let result = TurbopackResult {
+                result: NapiUpdate {
+                    update: ctx.env.to_js_value(&update)?,
+                },
+                issues: item
+                    .issues
+                    .iter()
+                    .map(|issue| NapiIssue::from(&**issue))
+                    .collect(),
+                diagnostics: vec![],
+            };
+            Ok(vec![result])
         },
     )
 }

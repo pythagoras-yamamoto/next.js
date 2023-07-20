@@ -302,6 +302,10 @@ const nextDev: CliCommand = async (argv) => {
           },
           watch: true,
         })
+
+        // for await (const update of project.hmrEvents(identifier)) {
+        //   Log.info('update', update)
+        // }
       }
     } catch (e) {
       console.dir(e)
